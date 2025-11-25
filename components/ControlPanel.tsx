@@ -164,7 +164,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                 onClick={onSurrender}
                 className="w-full py-1.5 mt-2 text-xs text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
              >
-                认输 (退出游戏)
+                🚩 认输 (退出游戏)
              </button>
         )}
       </div>

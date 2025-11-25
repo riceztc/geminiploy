@@ -85,7 +85,7 @@ export interface Room {
   id: string;
   name: string;
   hostId: string;
-  players: { id: string; name: string; isAI: boolean; isHost: boolean }[];
+  players: { id: string; name: string; isAI: boolean; isHost: boolean; socketId?: string }[];
   status: 'WAITING' | 'PLAYING';
   maxPlayers: number;
   createdAt: number;
@@ -104,10 +104,19 @@ export interface GameState {
   waitingForDoublesTurn: boolean; // Flag to indicate player rolled doubles and goes again
   currentUser: { id: string; name: string } | null; // Current logged in user
   roomId: string | null;
+  isHost: boolean;
 }
 
 export interface AIDecision {
   action: 'BUY' | 'PASS' | 'BUILD' | 'MORTGAGE' | 'PAY_JAIL';
   targetTileId?: number;
   reasoning: string;
+}
+
+export type ActionType = 'ROLL' | 'BUY' | 'PASS' | 'END_TURN' | 'PAY_BAIL' | 'UPGRADE' | 'SURRENDER';
+
+export interface NetworkAction {
+  type: ActionType;
+  playerId: string;
+  payload?: any;
 }
