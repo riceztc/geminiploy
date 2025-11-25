@@ -1,0 +1,5 @@
+{
+  "name": "GeminiPoly",
+  "description": "A modern, web-based property trading board game featuring AI opponents powered by Google Gemini. Supports local multiplayer and intelligent computer players.",
+  "requestFramePermissions": []
+}
