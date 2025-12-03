@@ -26,7 +26,7 @@ const getSocketUrl = () => {
     const protocol = window.location.protocol;
     const hostname = window.location.hostname;
     // Default to port 3001 for backend
-    return `${protocol}//${hostname}:3001`;
+    return `${protocol}//${hostname}:3002`;
 };
 
 const App: React.FC = () => {
