@@ -12,7 +12,7 @@ const io = new Server(server, {
 const rooms = {}; // { roomId: { id, name, hostId, socketHostId, players: [], status } }
 
 io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
+  console.log(`User connected: ${socket.id}`);
 
   // Get Room List
   socket.on("get_rooms", () => {
@@ -21,22 +21,28 @@ io.on("connection", (socket) => {
 
   // Create Room
   socket.on("create_room", ({ roomName, hostName, hostId }) => {
-    const roomId = Math.random().toString(36).substring(2, 9);
-    const newRoom = {
-      id: roomId,
-      name: roomName,
-      hostId: hostId, 
-      socketHostId: socket.id,
-      players: [{ id: hostId, name: hostName, isAI: false, isHost: true, socketId: socket.id }],
-      status: 'WAITING',
-      maxPlayers: 4,
-      createdAt: Date.now()
-    };
-    rooms[roomId] = newRoom;
-    socket.join(roomId);
-    
-    io.emit("rooms_list_update", Object.values(rooms));
-    socket.emit("room_joined", { roomId, room: newRoom });
+    try {
+        const roomId = Math.random().toString(36).substring(2, 9);
+        const newRoom = {
+          id: roomId,
+          name: roomName,
+          hostId: hostId, 
+          socketHostId: socket.id,
+          players: [{ id: hostId, name: hostName, isAI: false, isHost: true, socketId: socket.id }],
+          status: 'WAITING',
+          maxPlayers: 4,
+          createdAt: Date.now()
+        };
+        rooms[roomId] = newRoom;
+        socket.join(roomId);
+        
+        console.log(`Room created: ${roomName} (${roomId}) by ${hostName}`);
+        
+        io.emit("rooms_list_update", Object.values(rooms));
+        socket.emit("room_joined", { roomId, room: newRoom });
+    } catch (e) {
+        console.error("Error creating room:", e);
+    }
   });
 
   // Join Room
@@ -47,6 +53,8 @@ io.on("connection", (socket) => {
       room.players.push(newPlayer);
       socket.join(roomId);
       
+      console.log(`User ${user.name} joined room ${roomId}`);
+
       io.emit("rooms_list_update", Object.values(rooms));
       io.to(roomId).emit("room_player_update", room);
       socket.emit("room_joined", { roomId, room });
@@ -67,6 +75,7 @@ io.on("connection", (socket) => {
   socket.on("start_game", ({ roomId, initialGameState }) => {
     if (rooms[roomId] && rooms[roomId].socketHostId === socket.id) {
       rooms[roomId].status = 'PLAYING';
+      console.log(`Game started in room ${roomId}`);
       io.emit("rooms_list_update", Object.values(rooms));
       io.to(roomId).emit("game_started", initialGameState);
     }
@@ -87,15 +96,20 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Handle Disconnect (Simplified)
+  // Handle Disconnect
   socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
-    // In a full production app, you would handle room cleanup or host migration here.
-    // For this version, if host disconnects, the room might become unresponsive.
+    console.log(`User disconnected: ${socket.id}`);
+    // Cleanup logic could go here (e.g. remove empty rooms)
   });
 });
 
 const PORT = 3001;
 server.listen(PORT, () => {
   console.log(`Socket.IO Server running on port ${PORT}`);
+}).on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+        console.error(`Port ${PORT} is already in use! Please ensure no other instance is running.`);
+    } else {
+        console.error("Server error:", e);
+    }
 });

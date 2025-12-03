@@ -13,16 +13,28 @@ import TileComponent from './components/Tile';
 import ControlPanel from './components/ControlPanel';
 import GameLogComponent from './components/GameLog';
 import { getAIDecision } from './services/geminiService';
-import { v4 as uuidv4 } from 'uuid';
 import { io, Socket } from "socket.io-client";
 
+// Helper for IDs without external deps
+const generateId = () => {
+    return Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+};
+
 // --- CONFIGURATION ---
-// IMPORTANT: Change this URL to your server's IP if deploying!
-const SOCKET_URL = "http://localhost:3001";
+// Dynamic URL detection for LAN/Synology deployment
+const getSocketUrl = () => {
+    const protocol = window.location.protocol;
+    const hostname = window.location.hostname;
+    // Default to port 3001 for backend
+    return `${protocol}//${hostname}:3001`;
+};
 
 const App: React.FC = () => {
   // --- STATE ---
   const [socket, setSocket] = useState<Socket | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isOfflineMode, setIsOfflineMode] = useState(false);
+
   const [gameState, setGameState] = useState<GameState>({
     players: [],
     currentPlayerIndex: 0,
@@ -50,16 +62,33 @@ const App: React.FC = () => {
 
   // --- SOCKET SETUP ---
   useEffect(() => {
-    const newSocket = io(SOCKET_URL, {
+    if (isOfflineMode) return;
+
+    const socketUrl = getSocketUrl();
+    console.log("Attempting to connect to:", socketUrl);
+
+    const newSocket = io(socketUrl, {
         reconnectionAttempts: 5,
-        timeout: 10000
+        timeout: 5000,
+        transports: ['websocket', 'polling'] // Force websocket first
     });
     setSocket(newSocket);
 
     newSocket.on("connect", () => {
         console.log("Connected to server:", newSocket.id);
+        setIsConnected(true);
         // Request rooms list on connect
         newSocket.emit("get_rooms");
+    });
+
+    newSocket.on("disconnect", () => {
+        console.log("Disconnected from server");
+        setIsConnected(false);
+    });
+
+    newSocket.on("connect_error", (err) => {
+        console.error("Connection error:", err);
+        setIsConnected(false);
     });
 
     newSocket.on("rooms_list_update", (updatedRooms: Room[]) => {
@@ -76,7 +105,6 @@ const App: React.FC = () => {
     });
 
     newSocket.on("room_player_update", (room: Room) => {
-        // Update room display in lobby (handled by rooms_list_update mostly, but this is specific for the setup screen)
         setRooms(prev => prev.map(r => r.id === room.id ? room : r));
     });
 
@@ -111,16 +139,11 @@ const App: React.FC = () => {
     return () => {
         newSocket.disconnect();
     };
-  }, []);
+  }, [isOfflineMode]);
 
   // --- HELPERS ---
-  const addLog = useCallback((message: string, type: GameLog['type'] = 'info') => {
-    // Helper mostly for local logs, but in Host mode, logs are part of state.
-    // We update state directly in logic functions.
-  }, []);
-
   const createLog = (message: string, type: GameLog['type'] = 'info'): GameLog => ({
-      id: uuidv4(),
+      id: generateId(),
       message,
       type,
       timestamp: Date.now()
@@ -131,15 +154,15 @@ const App: React.FC = () => {
 
   // Sync state to server (Host Only)
   const broadcastState = (newState: GameState) => {
+      if (isOfflineMode) return; // No broadcast in offline mode
       if (socket && newState.roomId) {
-          // Remove local-only fields if any (currently mostly synced)
           socket.emit("update_game_state", { roomId: newState.roomId, state: newState });
       }
   };
 
   // --- ACTION HANDLING (HOST & CLIENT) ---
   
-  // This function decides whether to execute locally (Host) or send to network (Client)
+  // This function decides whether to execute locally (Host/Offline) or send to network (Client)
   const dispatchAction = (type: ActionType, payload?: any) => {
       if (!gameState.currentUser) return;
       const action: NetworkAction = {
@@ -148,8 +171,8 @@ const App: React.FC = () => {
           payload
       };
 
-      if (gameState.isHost) {
-          // Host executes immediately
+      if (gameState.isHost || isOfflineMode) {
+          // Host or Offline executes immediately
           executeGameLogic(action);
       } else {
           // Client sends to Host
@@ -222,8 +245,6 @@ const App: React.FC = () => {
       // Release tiles
       const newTiles = state.tiles.map(t => t.ownerId === player.id ? { ...t, ownerId: null, houseCount: 0 } : t);
       
-      // If it was their turn, end it. If not, just mark them dead.
-      // If it WAS their turn, we need to move to next player.
       const isTurn = state.players[state.currentPlayerIndex].id === player.id;
       
       let nextState = { ...state, players: newPlayers, tiles: newTiles };
@@ -231,7 +252,6 @@ const App: React.FC = () => {
       if (isTurn) {
          return processEndTurn(nextState, logs);
       } else {
-         // Check win condition immediately if someone quit out of turn
          const activePlayers = nextState.players.filter(p => !p.bankrupt);
          if (activePlayers.length <= 1) {
             return { ...nextState, winner: activePlayers[0] || null, phase: GamePhase.GAME_OVER };
@@ -448,14 +468,10 @@ const App: React.FC = () => {
 
       // 2. Chance / Community Chest
       if (tile.type === TileType.CHANCE || tile.type === TileType.COMMUNITY_CHEST) {
-          // Instant draw logic for simplicity in Host mode
           const cardIndex = Math.floor(Math.random() * CHANCE_CARDS.length);
           const card = CHANCE_CARDS[cardIndex];
           
           let nextState = { ...state, currentCard: card, phase: GamePhase.SHOWING_CARD };
-          // NOTE: We cannot easily do "setTimeout" in this state reducer without side effects.
-          // For the Host logic, we will apply the effect immediately but perhaps the client will see the card.
-          // To improve UX, we could use a separate "ACK" action, but let's apply effect now.
           return applyChanceEffect(nextState, playerId, card, isDouble, logs);
       }
 
@@ -466,7 +482,6 @@ const App: React.FC = () => {
             const owner = state.players.find(p => p.id === tile.ownerId);
             if (owner && !owner.bankrupt) {
                 let rent = 0;
-                // ... (Rent calc logic same as before) ...
                 if (tile.type === TileType.PROPERTY) {
                      const baseRent = tile.rent ? tile.rent[tile.houseCount || 0] : 0;
                      if ((tile.houseCount === 0 || tile.houseCount === undefined) && checkOwnsGroup(owner.id, tile.group, state.tiles)) {
@@ -586,14 +601,48 @@ const App: React.FC = () => {
 
 
   // --- ROOM MANAGEMENT ---
-  const handleLogin = () => {
-    if (!nickname.trim()) return;
-    const user = { id: uuidv4(), name: nickname.trim() };
-    setGameState(prev => ({ ...prev, currentUser: user, phase: GamePhase.LOBBY_ROOMS }));
+  const handleLogin = (offline: boolean) => {
+    let currentNickname = nickname.trim();
+    
+    // Auto-generate nickname for offline mode if empty
+    if (offline && !currentNickname) {
+        currentNickname = `游客${Math.floor(Math.random() * 9000) + 1000}`;
+        setNickname(currentNickname);
+    }
+    
+    if (!currentNickname) return;
+    
+    const user = { id: generateId(), name: currentNickname };
+    
+    if (offline) {
+        setIsOfflineMode(true);
+        // Create a dummy room immediately
+        const dummyRoomId = "offline-room";
+        const dummyRoom: Room = {
+            id: dummyRoomId,
+            name: "单机练习室",
+            hostId: user.id,
+            players: [{ ...user, isAI: false, isHost: true }],
+            status: 'WAITING',
+            maxPlayers: 4,
+            createdAt: Date.now()
+        };
+        setRooms([dummyRoom]);
+        setGameState(prev => ({ 
+            ...prev, 
+            currentUser: user, 
+            roomId: dummyRoomId,
+            phase: GamePhase.ROOM_SETUP,
+            isHost: true 
+        }));
+    } else {
+        setGameState(prev => ({ ...prev, currentUser: user, phase: GamePhase.LOBBY_ROOMS }));
+    }
   };
 
   const createRoom = () => {
     if (!gameState.currentUser || !newRoomName.trim()) return;
+    if (isOfflineMode) return; // Should not reach here in UI
     socket?.emit("create_room", { 
         roomName: newRoomName.trim(), 
         hostName: gameState.currentUser.name, 
@@ -608,20 +657,30 @@ const App: React.FC = () => {
 
   const addAI = () => {
     if (!gameState.roomId || !gameState.isHost) return;
-    const aiIcons = ['🤖', '🐶', '👽', '🦖'];
+    
+    // Find current room
     const currentRoom = rooms.find(r => r.id === gameState.roomId);
     if (!currentRoom) return;
+    if (currentRoom.players.length >= 4) return;
 
-    const currentCount = currentRoom.players.length;
-    if (currentCount >= 4) return;
-
+    const currentCount = currentRoom.players.filter(p => p.isAI).length + 1;
     const aiPlayer = { 
-        id: uuidv4(), 
+        id: generateId(), 
         name: `电脑 ${currentCount}`, 
         isAI: true, 
         isHost: false 
     };
-    socket?.emit("add_ai", { roomId: gameState.roomId, aiPlayer });
+
+    if (isOfflineMode) {
+        // Update local room state
+        const updatedRoom = { 
+            ...currentRoom, 
+            players: [...currentRoom.players, aiPlayer] 
+        };
+        setRooms([updatedRoom]);
+    } else {
+        socket?.emit("add_ai", { roomId: gameState.roomId, aiPlayer });
+    }
   };
 
   const handleStartGameRequest = () => {
@@ -658,18 +717,27 @@ const App: React.FC = () => {
         currentCard: null,
         selectedTileId: null,
         waitingForDoublesTurn: false,
-        currentUser: null, // Placeholder, replaced locally
+        currentUser: null, // Placeholder, kept from prev state
         roomId: room.id,
         isHost: true // Sent as template
     };
 
-    socket?.emit("start_game", { roomId: gameState.roomId, initialGameState: initialState });
+    if (isOfflineMode) {
+        setGameState(prev => ({
+            ...initialState,
+            currentUser: prev.currentUser,
+            roomId: prev.roomId,
+            isHost: true
+        }));
+    } else {
+        socket?.emit("start_game", { roomId: gameState.roomId, initialGameState: initialState });
+    }
   };
 
 
   // --- AI HOOK (HOST ONLY) ---
   useEffect(() => {
-    // Only Host runs AI
+    // Only Host runs AI (or Offline mode which is effectively host)
     if (!gameState.isHost) return;
 
     const activeStates = [GamePhase.ROLLING, GamePhase.ACTION, GamePhase.END_TURN];
@@ -679,6 +747,7 @@ const App: React.FC = () => {
     if (!currentPlayer || !currentPlayer.isAI || currentPlayer.bankrupt) return;
 
     const runAITurn = async () => {
+      // Small delay for realism
       await new Promise(r => setTimeout(r, 1000));
 
       if (gameState.phase === GamePhase.ROLLING) {
@@ -691,9 +760,6 @@ const App: React.FC = () => {
         }
       } else if (gameState.phase === GamePhase.ACTION) {
          const decision = await getAIDecision(gameState, currentPlayer);
-         // Log the thinking? We need to add log action or just direct state mod if host.
-         // Host direct state mod for logs is easier in `executeGameLogic` but here we want to log reasoning.
-         // Let's just execute the action.
          
          if (decision.action === 'BUY') {
             executeGameLogic({ type: 'BUY', playerId: currentPlayer.id });
@@ -715,7 +781,7 @@ const App: React.FC = () => {
   if (gameState.phase === GamePhase.LOGIN) {
       return (
         <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full text-center">
+            <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full text-center relative">
                 <h1 className="text-4xl font-extrabold text-indigo-600 mb-6">GeminiPoly Online</h1>
                 <p className="text-slate-500 mb-6">请输入您的昵称以开始</p>
                 <input 
@@ -725,13 +791,35 @@ const App: React.FC = () => {
                     placeholder="例如: 大富翁高手"
                     className="w-full border border-slate-300 rounded-lg px-4 py-3 mb-4 focus:ring-2 focus:ring-indigo-500 outline-none text-lg text-center"
                 />
-                <button 
-                    onClick={handleLogin}
-                    disabled={!nickname.trim()}
-                    className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold py-3 px-6 rounded-xl transition-all shadow-lg"
-                >
-                    进入大厅
-                </button>
+                <div className="flex flex-col gap-3 relative z-10">
+                    <button 
+                        onClick={() => handleLogin(false)}
+                        disabled={!nickname.trim() || !isConnected}
+                        className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold py-3 px-6 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2"
+                    >
+                        {isConnected ? '进入多人大厅' : '连接服务器中...'}
+                    </button>
+                    
+                    <div className="relative flex py-2 items-center">
+                        <div className="flex-grow border-t border-gray-200"></div>
+                        <span className="flex-shrink mx-4 text-gray-400 text-sm">或者</span>
+                        <div className="flex-grow border-t border-gray-200"></div>
+                    </div>
+
+                    <button 
+                        onClick={() => handleLogin(true)}
+                        // Removed disabled constraint for offline mode
+                        className="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-3 px-6 rounded-xl transition-all shadow-lg"
+                    >
+                        {nickname.trim() ? '单机练习 (无需联网)' : '单机练习 (自动生成昵称)'}
+                    </button>
+                </div>
+                
+                {/* Connection Status Indicator */}
+                <div className="absolute bottom-4 left-0 right-0 flex justify-center items-center gap-2 text-xs text-slate-400">
+                    <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`}></div>
+                    {isConnected ? '服务器已连接' : '未连接到服务器'}
+                </div>
             </div>
         </div>
       );
@@ -806,7 +894,7 @@ const App: React.FC = () => {
           <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
               <div className="bg-white rounded-2xl shadow-xl p-8 max-w-2xl w-full">
                   <div className="flex justify-between items-center mb-6 border-b pb-4">
-                      <h2 className="text-2xl font-bold text-slate-800">{room.name}</h2>
+                      <h2 className="text-2xl font-bold text-slate-800">{room.name} {isOfflineMode && '(单机)'}</h2>
                       {/* Leave room logic omitted for brevity in network version - would need socket event */}
                   </div>
 
@@ -903,7 +991,7 @@ const App: React.FC = () => {
         <div className="flex items-center justify-between md:justify-start gap-2 mb-2">
             <h1 className="text-xl font-bold text-indigo-900">GeminiPoly</h1>
             <span className="bg-indigo-100 text-indigo-800 text-[10px] font-semibold px-2 py-0.5 rounded">
-                {gameState.isHost ? 'Host' : 'Guest'} | Room: {rooms.find(r => r.id === gameState.roomId)?.name}
+                {isOfflineMode ? 'Offline' : (gameState.isHost ? 'Host' : 'Guest')} | Room: {rooms.find(r => r.id === gameState.roomId)?.name}
             </span>
         </div>
         
@@ -924,7 +1012,7 @@ const App: React.FC = () => {
         />
         
         {/* Mask controls if not my turn (Double check visual aid) */}
-        {!isMyTurn && gameState.phase !== GamePhase.GAME_OVER && (
+        {!isMyTurn && (
             <div className="text-center text-xs text-slate-400">
                 (观察模式: 等待 {currentPlayer.name} 行动)
             </div>
